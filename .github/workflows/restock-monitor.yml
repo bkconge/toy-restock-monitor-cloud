@@ -45,6 +45,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh cache delete state-v1 --succeed-on-no-caches
 
+      - name: Provision runtime config and data dir
+        run: |
+          mkdir -p data logs
+          cp config.example.yaml config.yaml
+
       - name: Run one tick
         env:
           NTFY_TOPIC_URL: ${{ secrets.NTFY_TOPIC_URL }}
@@ -57,7 +62,10 @@ jobs:
         if: always()
         run: |
           python -c "
-          import sqlite3
+          import sqlite3, os
+          if not os.path.exists('data/state.db'):
+              print('no state.db yet (tick likely failed before DB bootstrap)')
+              raise SystemExit(0)
           c = sqlite3.connect('data/state.db')
           print('snapshots last 10 min:', c.execute(\"SELECT COUNT(*) FROM snapshots WHERE fetched_at > datetime('now','-10 minutes')\").fetchone()[0])
           print('alerts last 24h:', c.execute(\"SELECT COUNT(*) FROM alerts WHERE fired_at > datetime('now','-24 hours')\").fetchone()[0])
