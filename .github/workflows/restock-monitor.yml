@@ -43,7 +43,7 @@ jobs:
         if: steps.cache-restore.outputs.cache-hit == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh cache delete state-v1 --succeed-on-no-caches
+        run: gh cache delete state-v1 || true
 
       - name: Provision runtime config and data dir
         run: |
