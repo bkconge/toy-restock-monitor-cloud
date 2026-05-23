@@ -1,0 +1,29 @@
+notifier: ntfy
+poll_interval_seconds: 300
+cooldown_minutes: 60
+parse_fail_threshold: 5
+http_read_timeout_seconds: 30
+tick_wall_clock_cap_seconds: 180
+log_level: INFO
+
+ntfy_topic_url: env:NTFY_TOPIC_URL
+redsky_key: env:TARGET_REDSKY_KEY
+
+watches:
+  - id: neeoh-any
+    name: "Nee Doh — any variant"
+    msrp_cap: 6.99
+    sources:
+      - https://www.target.com/s?searchTerm=nee+doh
+
+  - id: squeeezy-strawberry
+    name: "Squeeezy Strawberry"
+    msrp_cap: 6.99
+    sources:
+      - https://www.target.com/p/sunny-days-squeezy-strawberry/-/A-94757072
+
+  - id: squeeezy-cheese
+    name: "Squeeezy Cheese (Target exclusive)"
+    msrp_cap: 6.99
+    sources:
+      - https://www.target.com/p/sunny-days-squeezy-cheese-block/-/A-1003785284

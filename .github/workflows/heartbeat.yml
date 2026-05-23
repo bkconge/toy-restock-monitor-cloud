@@ -1,0 +1,22 @@
+name: heartbeat
+on:
+  schedule:
+    - cron: '0 9 * * MON'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  push-heartbeat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update heartbeat file and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          date -u --iso-8601=seconds > last-heartbeat.txt
+          git add last-heartbeat.txt
+          git commit -m "heartbeat: $(date -u --iso-8601=seconds)" || echo "no change"
+          git push

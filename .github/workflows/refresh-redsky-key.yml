@@ -1,0 +1,22 @@
+name: refresh-redsky-key
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scrape current RedSky key
+        run: bash scripts/refresh-redsky-key.sh
+      # Output ends in stdout. Brian copies the key from the workflow log
+      # and runs `gh secret set TARGET_REDSKY_KEY` from his Mac.
+      - name: Instruction reminder
+        run: |
+          echo
+          echo "Copy the key printed above and run from your Mac:"
+          echo "  gh secret set TARGET_REDSKY_KEY --repo bkconge/toy-restock-monitor-cloud"

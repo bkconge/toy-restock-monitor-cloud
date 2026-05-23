@@ -1,0 +1,71 @@
+name: restock-monitor
+
+on:
+  schedule:
+    - cron: '7-59/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      force_in_stock:
+        description: "watch_id to force in-stock (smoke test); empty for normal run"
+        required: false
+        default: ""
+
+concurrency:
+  group: restock-monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write   # for the delete-cache step
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Restore state cache
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: data/
+          key: state-v1
+
+      - name: Delete previous cache entry (so save can overwrite)
+        if: steps.cache-restore.outputs.cache-hit == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh cache delete state-v1 --succeed-on-no-caches
+
+      - name: Run one tick
+        env:
+          NTFY_TOPIC_URL: ${{ secrets.NTFY_TOPIC_URL }}
+          TARGET_REDSKY_KEY:     ${{ secrets.TARGET_REDSKY_KEY }}
+          TEST_FORCE_IN_STOCK: ${{ inputs.force_in_stock }}
+          PYTHONUNBUFFERED: "1"
+        run: python -m src.main --once
+
+      - name: Print summary
+        if: always()
+        run: |
+          python -c "
+          import sqlite3
+          c = sqlite3.connect('data/state.db')
+          print('snapshots last 10 min:', c.execute(\"SELECT COUNT(*) FROM snapshots WHERE fetched_at > datetime('now','-10 minutes')\").fetchone()[0])
+          print('alerts last 24h:', c.execute(\"SELECT COUNT(*) FROM alerts WHERE fired_at > datetime('now','-24 hours')\").fetchone()[0])
+          "
+
+      - name: Save state cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/
+          key: state-v1
