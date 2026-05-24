@@ -189,6 +189,14 @@ class ResolveEnvTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             _resolve_env("env:")
 
+    def test_env_var_set_to_empty_string_raises(self) -> None:
+        # GitHub Actions substitutes ${{ secrets.MISSING }} with "" rather
+        # than leaving the var unset; treat empty as missing to fail fast.
+        with unittest.mock.patch.dict(os.environ, {"EMPTY_SECRET": ""}, clear=True):
+            with self.assertRaises(ConfigError) as ctx:
+                _resolve_env("env:EMPTY_SECRET")
+            self.assertIn("EMPTY_SECRET", str(ctx.exception))
+
     def test_non_env_string_passes_through(self) -> None:
         self.assertEqual(_resolve_env("plain-value"), "plain-value")
         self.assertEqual(_resolve_env("https://example.com"), "https://example.com")

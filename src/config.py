@@ -72,10 +72,13 @@ def _resolve_env(value: Any) -> Any:
     name = value[4:]
     if not name:
         raise ConfigError("config: 'env:' prefix without variable name")
-    try:
-        return os.environ[name]
-    except KeyError:
-        raise ConfigError(f"config: env var {name!r} is not set") from None
+    # Treat empty-string the same as missing: GitHub Actions substitutes
+    # `${{ secrets.MISSING }}` with "" rather than leaving the var unset,
+    # so a KeyError-only check would silently accept a missing secret.
+    resolved = os.environ.get(name, "")
+    if not resolved:
+        raise ConfigError(f"config: env var {name!r} is not set or empty")
+    return resolved
 
 
 def _check_type(key: str, value: Any, expected: type | tuple[type, ...]) -> None:
