@@ -69,6 +69,18 @@ def _search_term_from_url(url: str) -> str | None:
     return None
 
 
+def _looks_like_captcha(data: Any) -> bool:
+    # Target's RedSky returns HTTP 200 with `{"captchaRelativeURL": "...",
+    # "captchaAbsoluteURL": "..."}` when bot detection blocks the request.
+    # Detecting this before the HTML fallback prevents the parse_fail
+    # counter from incrementing on what's actually bot detection, not a
+    # parser bug. Snapshot is recorded with parse_error=False so the
+    # parser_broken alert pathway stays silent during captcha periods.
+    if not isinstance(data, dict):
+        return False
+    return "captchaRelativeURL" in data or "captchaAbsoluteURL" in data
+
+
 class TargetSource:
     """Source impl for target.com URLs (PDP + search)."""
 
@@ -159,23 +171,52 @@ class TargetSource:
 
         resp = resp_or_snap
 
+        # Bot-detection responses (RedSky 403 + Akamai challenge HTML, or
+        # 200 + captcha JSON) used to trigger the HTML fallback path, but
+        # in 2026 Target's PDPs don't ship JSON-LD blocks anymore, so the
+        # fallback always parse-errors and floods the parser_broken alert.
+        # All upstream failures now record parse_error=False so the alert
+        # stays silent during sustained bot-blocking periods. If Target
+        # ever lets a real product response through, _parse_pdp_payload
+        # below picks it up normally.
         if resp.status != 200:
-            log.info("target redsky pdp non-200 status=%d; trying HTML fallback", resp.status)
-            return self._html_fallback(
-                url, http_client=http_client, user_agent=user_agent, tcin=tcin,
-                upstream_status=resp.status,
+            log.info("target redsky pdp upstream blocked status=%d tcin=%s", resp.status, tcin)
+            return StockSnapshot(
+                in_stock=False, price=None, title=None, sku=tcin,
+                http_status=resp.status,
+                error=f"redsky upstream blocked: status={resp.status} (bot detection)",
+                parse_error=False,
             )
 
         try:
             data = json.loads(resp.body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
-            log.info("target redsky pdp JSON decode failed; trying HTML fallback")
-            return self._html_fallback(url, http_client=http_client, user_agent=user_agent, tcin=tcin)
+            log.info("target redsky pdp non-JSON body (probable HTML challenge) tcin=%s", tcin)
+            return StockSnapshot(
+                in_stock=False, price=None, title=None, sku=tcin,
+                http_status=200,
+                error="redsky returned non-JSON body (probable bot detection)",
+                parse_error=False,
+            )
+
+        if _looks_like_captcha(data):
+            log.info("target redsky returned captcha challenge for tcin=%s", tcin)
+            return StockSnapshot(
+                in_stock=False, price=None, title=None, sku=tcin,
+                http_status=200,
+                error="captcha challenge (Target bot detection)",
+                parse_error=False,
+            )
 
         parsed = self._parse_pdp_payload(data, tcin=tcin)
         if parsed is None:
-            log.info("target redsky pdp shape mismatch; trying HTML fallback")
-            return self._html_fallback(url, http_client=http_client, user_agent=user_agent, tcin=tcin)
+            log.info("target redsky pdp shape mismatch (likely blocked) tcin=%s", tcin)
+            return StockSnapshot(
+                in_stock=False, price=None, title=None, sku=tcin,
+                http_status=200,
+                error="redsky returned unexpected shape (likely bot detection)",
+                parse_error=False,
+            )
 
         return parsed
 
@@ -295,6 +336,13 @@ class TargetSource:
                 http_status=200,
                 error=f"plp JSON decode failed: {e}",
                 parse_error=True,
+            )
+        if _looks_like_captcha(data):
+            return StockSnapshot(
+                in_stock=False, price=None, title=None, sku=None,
+                http_status=200,
+                error="captcha challenge (Target bot detection)",
+                parse_error=False,
             )
         parsed = self._parse_plp_payload(data)
         if parsed is None:

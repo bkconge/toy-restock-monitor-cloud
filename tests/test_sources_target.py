@@ -85,59 +85,61 @@ class TestPDPParsing(unittest.TestCase):
         self.assertFalse(snap.parse_error)
         self.assertEqual(snap.http_status, 200)
 
-    def test_pdp_malformed_triggers_html_fallback_then_parse_error(self):
-        malformed = (FIXTURES / "target_redsky_malformed.json").read_bytes()
-        jsonld_html = (FIXTURES / "target_pdp_jsonld.html").read_bytes()
-        call_count = {"n": 0}
-
-        def reply(req, timeout):
-            call_count["n"] += 1
-            url = req.full_url
-            if "redsky.target.com" in url:
-                return _FakeRespCM(status=200, headers={"content-type": "application/json"}, body=malformed, url=url)
-            return _FakeRespCM(status=200, headers={"content-type": "text/html"}, body=jsonld_html, url=url)
-
-        with _opener_patch(reply):
+    def test_pdp_captcha_does_not_count_as_parse_error(self):
+        # Target's RedSky returns 200 with a captcha JSON when bot detection
+        # fires. The fix: detect this and record it WITHOUT setting parse_error,
+        # so the orchestrator's parse_fail counter doesn't increment and no
+        # parser_broken alert spam happens during sustained captcha periods.
+        captcha_body = b'{"captchaRelativeURL":"/captcha?trackingId=abc","captchaAbsoluteURL":"https://redsky.target.com/captcha?trackingId=abc"}'
+        with self._serve_body(captcha_body):
             snap = self.source.fetch(self.url, http_client=self.client, user_agent=self.ua)
-        # malformed RedSky -> HTML fallback succeeds (we serve a hand-crafted JSON-LD)
-        self.assertGreaterEqual(call_count["n"], 2)
-        self.assertTrue(snap.in_stock)
-        self.assertEqual(snap.price, 5.99)
+        self.assertFalse(snap.in_stock)
         self.assertEqual(snap.sku, "94757072")
-        self.assertFalse(snap.parse_error)
+        self.assertFalse(snap.parse_error, "captcha must NOT count as parse_error (orchestrator would alert)")
+        self.assertEqual(snap.http_status, 200)
+        self.assertIsNotNone(snap.error)
+        self.assertIn("captcha", snap.error.lower())
 
-    def test_pdp_malformed_with_no_fallback_html_produces_parse_error(self):
+    def test_pdp_malformed_records_blocked_snapshot_no_parse_error(self):
+        # Post-2026-05 fix: malformed/non-JSON RedSky response (typical of
+        # Akamai HTML challenges served at 200) records a 'blocked' snapshot
+        # with parse_error=False so the parser_broken alert path stays quiet
+        # during sustained bot detection.
         malformed = (FIXTURES / "target_redsky_malformed.json").read_bytes()
 
         def reply(req, timeout):
             if "redsky.target.com" in req.full_url:
                 return _FakeRespCM(status=200, headers={}, body=malformed, url=req.full_url)
-            return _FakeRespCM(status=200, headers={}, body=b"<html>no jsonld here</html>", url=req.full_url)
+            raise AssertionError("HTML fallback should NOT be called anymore")
 
         with _opener_patch(reply):
             snap = self.source.fetch(self.url, http_client=self.client, user_agent=self.ua)
-        self.assertTrue(snap.parse_error)
+        self.assertFalse(snap.parse_error)
         self.assertEqual(snap.http_status, 200)
         self.assertIsNotNone(snap.error)
+        self.assertIn("non-JSON", snap.error)
         self.assertFalse(snap.in_stock)
 
-    def test_pdp_redsky_500_falls_back_to_html(self):
-        jsonld_html = (FIXTURES / "target_pdp_jsonld.html").read_bytes()
-
+    def test_pdp_redsky_500_records_blocked_no_parse_error(self):
+        # Post-2026-05 fix: RedSky non-200 (500, 403, 429-after-backoff)
+        # records a blocked snapshot WITHOUT triggering HTML fallback (which
+        # always parse-errors against modern Target PDPs that don't ship
+        # JSON-LD blocks).
         def reply(req, timeout):
             if "redsky.target.com" in req.full_url:
                 raise urllib.error.HTTPError(
                     url=req.full_url, code=500, msg="Server Error",
                     hdrs=None, fp=io.BytesIO(b"server error"),
                 )
-            return _FakeRespCM(status=200, headers={"content-type": "text/html"}, body=jsonld_html, url=req.full_url)
+            raise AssertionError("HTML fallback should NOT be called anymore")
 
         with _opener_patch(reply):
             snap = self.source.fetch(self.url, http_client=self.client, user_agent=self.ua)
-        # Fallback successfully extracted JSON-LD => in_stock True, price 5.99
-        self.assertTrue(snap.in_stock)
-        self.assertEqual(snap.price, 5.99)
-        self.assertEqual(snap.sku, "94757072")
+        self.assertFalse(snap.in_stock)
+        self.assertEqual(snap.http_status, 500)
+        self.assertFalse(snap.parse_error)
+        self.assertIsNotNone(snap.error)
+        self.assertIn("upstream blocked", snap.error)
 
     def test_pdp_429_records_status_and_bumps_backoff(self):
         from datetime import datetime, timezone
@@ -209,23 +211,24 @@ class TestHtmlFallbackDirect(unittest.TestCase):
     def tearDown(self):
         self.td_ctx.cleanup()
 
-    def test_jsonld_fallback_extracts_availability_and_price(self):
-        # Trigger fallback via a RedSky shape mismatch (empty data).
-        jsonld_html = (FIXTURES / "target_pdp_jsonld.html").read_bytes()
-
+    def test_redsky_empty_data_records_blocked_no_parse_error(self):
+        # Post-2026-05 fix: RedSky 200 with empty data.product_summaries
+        # (or any shape that fails _parse_pdp_payload) records a blocked
+        # snapshot instead of triggering the always-failing HTML fallback.
         def reply(req, timeout):
             if "redsky.target.com" in req.full_url:
                 return _FakeRespCM(status=200, headers={}, body=b'{"data":{}}', url=req.full_url)
-            return _FakeRespCM(status=200, headers={"content-type": "text/html"}, body=jsonld_html, url=req.full_url)
+            raise AssertionError("HTML fallback should NOT be called anymore")
 
         url = "https://www.target.com/p/sunny-days-squeezy-strawberry/-/A-94757072"
         with _opener_patch(reply):
             snap = self.source.fetch(url, http_client=self.client, user_agent=self.ua)
-        self.assertTrue(snap.in_stock)
-        self.assertEqual(snap.price, 5.99)
-        self.assertEqual(snap.sku, "94757072")
-        self.assertEqual(snap.title, "Sunny Days Squeezy Strawberry")
+        self.assertFalse(snap.in_stock)
         self.assertFalse(snap.parse_error)
+        self.assertEqual(snap.http_status, 200)
+        self.assertIsNotNone(snap.error)
+        self.assertIn("unexpected shape", snap.error)
+        self.assertEqual(snap.sku, "94757072")
 
 
 if __name__ == "__main__":
